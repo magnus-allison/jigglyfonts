@@ -1,4 +1,20 @@
-import { useEffect, useRef, useState, type FC, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, useId, type FC, type CSSProperties } from 'react';
+
+export interface GradientStop {
+	/** Color at this stop */
+	color: string;
+	/** Position of stop (0-100) */
+	offset: number;
+}
+
+export interface GradientConfig {
+	/** Type of gradient */
+	type?: 'linear' | 'radial';
+	/** Angle for linear gradient (degrees) */
+	angle?: number;
+	/** Array of color stops */
+	stops: GradientStop[];
+}
 
 export interface JigglyTextProps {
 	/** The text to render */
@@ -9,6 +25,8 @@ export interface JigglyTextProps {
 	fontSize?: number;
 	/** Fill color of the text */
 	fill?: string;
+	/** Gradient fill (overrides fill if provided) */
+	gradient?: GradientConfig;
 	/** Stroke color of the text */
 	stroke?: string;
 	/** Stroke width */
@@ -25,6 +43,10 @@ export interface JigglyTextProps {
 	mouseRadius?: number;
 	/** Strength of mouse interaction effect */
 	mouseStrength?: number;
+	/** Wave mode - letters animate with sequential delay */
+	waveMode?: boolean;
+	/** Delay between each letter in wave mode (ms) */
+	waveDelay?: number;
 	/** Additional className for the SVG */
 	className?: string;
 	/** Additional styles for the SVG */
@@ -129,10 +151,11 @@ const morphCommandsWithMouse = (
 };
 
 export const JigglyText: FC<JigglyTextProps> = ({
-	text = 'Hello',
+	text = '',
 	font = 'Arial, sans-serif',
 	fontSize = 72,
 	fill = '#000000',
+	gradient,
 	stroke = 'none',
 	strokeWidth = 0,
 	intensity = 1.5,
@@ -141,18 +164,23 @@ export const JigglyText: FC<JigglyTextProps> = ({
 	interactsWithMouse = false,
 	mouseRadius = 50,
 	mouseStrength = 15,
+	waveMode = false,
+	waveDelay = 100,
 	className,
 	style
 }) => {
+	const gradientId = useId();
 	const svgRef = useRef<SVGSVGElement>(null);
 	const canvasRef = useRef<HTMLCanvasElement | null>(null);
 	const [pathData, setPathData] = useState<string>('');
 	const [viewBox, setViewBox] = useState<string>('0 0 100 100');
 	const [svgDimensions, setSvgDimensions] = useState({ width: 100, height: 100 });
 	const originalCommandsRef = useRef<PathCommand[]>([]);
+	const letterCommandsRef = useRef<PathCommand[][]>([]);
 	const animationFrameRef = useRef<number>();
 	const lastUpdateRef = useRef<number>(0);
 	const mousePositionRef = useRef<{ x: number; y: number } | null>(null);
+	const waveStartTimeRef = useRef<number>(0);
 
 	// Extract path data from text using canvas
 	useEffect(() => {
@@ -172,16 +200,15 @@ export const JigglyText: FC<JigglyTextProps> = ({
 		ctx.font = `${fontSize}px ${font}`;
 		ctx.textBaseline = 'top';
 
-		// We'll use a different approach - render each character as paths
-		// For now, we'll create an approximate path using the text outline
+		// Generate per-letter paths for wave mode
+		const { fullPath, perLetterPaths } = textToPathWithLetters(text, font, fontSize, 10, fontSize);
 
-		// Create SVG text path approximation using bezier curves
-		const path = textToPath(text, font, fontSize, 10, fontSize);
-
-		originalCommandsRef.current = parsePathData(path);
-		setPathData(path);
+		originalCommandsRef.current = parsePathData(fullPath);
+		letterCommandsRef.current = perLetterPaths.map((p) => parsePathData(p));
+		setPathData(fullPath);
 		setViewBox(`0 0 ${width} ${height}`);
 		setSvgDimensions({ width, height });
+		waveStartTimeRef.current = performance.now();
 
 		canvasRef.current = canvas;
 	}, [text, font, fontSize]);
@@ -192,25 +219,64 @@ export const JigglyText: FC<JigglyTextProps> = ({
 
 		const animate = (timestamp: number) => {
 			if (timestamp - lastUpdateRef.current >= speed) {
-				let commands = originalCommandsRef.current;
+				if (waveMode && letterCommandsRef.current.length > 0) {
+					// Wave mode: animate each letter with a phase offset
+					const elapsed = timestamp - waveStartTimeRef.current;
+					const newLetterPaths = letterCommandsRef.current.map((letterCmds, index) => {
+						// Calculate wave phase for this letter
+						const letterPhase = index * waveDelay;
+						const waveIntensity = Math.sin(((elapsed - letterPhase) / 200) * Math.PI) * 0.5 + 0.5;
+						const currentIntensity = intensity * waveIntensity;
 
-				// Apply jiggle if animated
-				if (animated) {
-					commands = jiggleCommands(commands, intensity);
+						let commands = letterCmds.map((cmd) => ({
+							...cmd,
+							values: [...cmd.originalValues],
+							originalValues: [...cmd.originalValues]
+						}));
+
+						// Apply jiggle with wave-modulated intensity
+						if (animated) {
+							commands = jiggleCommands(commands, currentIntensity);
+						}
+
+						// Apply mouse morphing if enabled
+						if (interactsWithMouse && mousePositionRef.current) {
+							commands = morphCommandsWithMouse(
+								commands,
+								mousePositionRef.current.x,
+								mousePositionRef.current.y,
+								mouseRadius,
+								mouseStrength
+							);
+						}
+
+						return commandsToPath(commands);
+					});
+
+					setPathData(newLetterPaths.join(''));
+				} else {
+					// Normal mode: animate all letters together
+					let commands = originalCommandsRef.current;
+
+					// Apply jiggle if animated
+					if (animated) {
+						commands = jiggleCommands(commands, intensity);
+					}
+
+					// Apply mouse morphing if enabled and mouse is in range
+					if (interactsWithMouse && mousePositionRef.current) {
+						commands = morphCommandsWithMouse(
+							commands,
+							mousePositionRef.current.x,
+							mousePositionRef.current.y,
+							mouseRadius,
+							mouseStrength
+						);
+					}
+
+					setPathData(commandsToPath(commands));
 				}
 
-				// Apply mouse morphing if enabled and mouse is in range
-				if (interactsWithMouse && mousePositionRef.current) {
-					commands = morphCommandsWithMouse(
-						commands,
-						mousePositionRef.current.x,
-						mousePositionRef.current.y,
-						mouseRadius,
-						mouseStrength
-					);
-				}
-
-				setPathData(commandsToPath(commands));
 				lastUpdateRef.current = timestamp;
 			}
 			animationFrameRef.current = requestAnimationFrame(animate);
@@ -223,7 +289,7 @@ export const JigglyText: FC<JigglyTextProps> = ({
 				cancelAnimationFrame(animationFrameRef.current);
 			}
 		};
-	}, [animated, intensity, speed, interactsWithMouse, mouseRadius, mouseStrength]);
+	}, [animated, intensity, speed, interactsWithMouse, mouseRadius, mouseStrength, waveMode, waveDelay]);
 
 	// Mouse interaction handler
 	const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
@@ -256,9 +322,32 @@ export const JigglyText: FC<JigglyTextProps> = ({
 			onMouseMove={handleMouseMove}
 			onMouseLeave={handleMouseLeave}
 		>
+			{gradient && (
+				<defs>
+					{gradient.type === 'radial' ? (
+						<radialGradient id={gradientId}>
+							{gradient.stops.map((stop, i) => (
+								<stop key={i} offset={`${stop.offset}%`} stopColor={stop.color} />
+							))}
+						</radialGradient>
+					) : (
+						<linearGradient
+							id={gradientId}
+							x1='0%'
+							y1='0%'
+							x2={`${Math.cos((((gradient.angle ?? 0) - 90) * Math.PI) / 180) * 50 + 50}%`}
+							y2={`${Math.sin((((gradient.angle ?? 0) - 90) * Math.PI) / 180) * 50 + 50}%`}
+						>
+							{gradient.stops.map((stop, i) => (
+								<stop key={i} offset={`${stop.offset}%`} stopColor={stop.color} />
+							))}
+						</linearGradient>
+					)}
+				</defs>
+			)}
 			<path
 				d={pathData}
-				fill={fill}
+				fill={gradient ? `url(#${gradientId})` : fill}
 				stroke={stroke}
 				strokeWidth={strokeWidth}
 				style={{
@@ -283,26 +372,35 @@ export const JigglyText: FC<JigglyTextProps> = ({
 	);
 };
 
-// Generate approximate path data for text
+// Generate approximate path data for text with per-letter paths
 // This creates a hand-drawn style path for each character
-function textToPath(text: string, font: string, fontSize: number, startX: number, startY: number): string {
+function textToPathWithLetters(
+	text: string,
+	font: string,
+	fontSize: number,
+	startX: number,
+	startY: number
+): { fullPath: string; perLetterPaths: string[] } {
 	const canvas = document.createElement('canvas');
 	const ctx = canvas.getContext('2d');
-	if (!ctx) return '';
+	if (!ctx) return { fullPath: '', perLetterPaths: [] };
 
 	ctx.font = `${fontSize}px ${font}`;
 
-	let pathData = '';
+	const perLetterPaths: string[] = [];
 	let currentX = startX;
 
 	for (const char of text) {
 		const charWidth = ctx.measureText(char).width;
 		const charPath = characterToPath(char, currentX, startY, charWidth, fontSize);
-		pathData += charPath;
+		perLetterPaths.push(charPath);
 		currentX += charWidth;
 	}
 
-	return pathData;
+	return {
+		fullPath: perLetterPaths.join(''),
+		perLetterPaths
+	};
 }
 
 // Generate path for individual character using geometric approximation
@@ -482,9 +580,11 @@ function characterToPath(char: string, x: number, y: number, width: number, heig
 			const top = y - hh;
 			const cx = x + w * 0.5;
 			const cy = y - hh * 0.5;
-			const barY = cy - s * 0.2;
-			// Simple 'e': oval with horizontal bar and open bottom-right
-			return `M${x + w},${cy} L${x + w},${barY} L${x},${barY} L${x},${cy} Q${x},${top} ${cx},${top} Q${x + w},${top} ${x + w},${cy} Z M${x + s},${barY + s} L${x + w - s},${barY + s} L${x + w - s},${cy} Q${x + w - s},${top + s} ${cx},${top + s} Q${x + s},${top + s} ${x + s},${cy} Z M${x},${cy} Q${x},${y} ${cx},${y} Q${x + w * 0.75},${y} ${x + w},${y - hh * 0.2} L${x + w - s},${y - hh * 0.25} Q${x + w * 0.7},${y - s} ${cx},${y - s} Q${x + s},${y - s} ${x + s},${cy} L${x},${cy} Z`;
+			const barY = cy;
+			// Outer bowl from bar level up and around
+			// Start at right side at bar level, go up around the top, down the left, across to form bar
+			const outerPath = `M${x + w},${barY} Q${x + w},${top} ${cx},${top} Q${x},${top} ${x},${cy} Q${x},${y} ${cx},${y} Q${x + w * 0.8},${y} ${x + w},${y - hh * 0.25} L${x + w - s},${y - hh * 0.3} Q${x + w * 0.75},${y - s} ${cx},${y - s} Q${x + s},${y - s} ${x + s},${cy} Q${x + s},${top + s} ${cx},${top + s} Q${x + w - s},${top + s} ${x + w - s},${barY} L${x + w - s},${barY + s} L${x + s},${barY + s} L${x + s},${barY} Z`;
+			return outerPath;
 		},
 		f: (x, y, w, h) => {
 			const top = y - h;

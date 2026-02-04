@@ -1,1 +1,1 @@
-export { JigglyText, type JigglyTextProps } from './JigglyText';
+export { JigglyText, type JigglyTextProps, type GradientConfig, type GradientStop } from './JigglyText';
