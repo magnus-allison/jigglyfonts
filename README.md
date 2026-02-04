@@ -1,5 +1,7 @@
 # JigglyFonts 🌊
 
+![result1770163830](https://github.com/user-attachments/assets/f8dd6e76-fbac-4a31-9e1d-d50d9152846e)
+
 Render text as jiggly SVG with jelly-like wiggle animations. A fun React component that makes your text come alive!
 
 ## Installation
